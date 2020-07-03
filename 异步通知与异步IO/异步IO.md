@@ -260,3 +260,37 @@ err:
 	return -1;
 }
 ```
+
+### AIO与设备驱动
+用户空间调用io_submit()之后，对应于用户传递的每一个iocb结构，内核会生成一个与之对应的kiocb结构。file_operations包含3个与AIO相关的成员函数：
+```c
+ssize_t (*aio_read)(struct kiocb *iocb, const struct iovec *iov, unsigned long nr_segs, loff_t pos);
+ssize_t (*aio_write)(struct kiocb *iocb, const struct iovec *iov, unsigned long nr_segs, loff_t pos);
+int (*aio_fsync)(struct kiocb *iocb, int datasync);
+```
+io_submit()系统调用间接引起了file_operations中的aio_read()和aio_write()的调用。在早期的Linux内核中，aio_read()和aio_write()的原型是：
+```c
+ssize_t (*aio_read)(struct kiocb *iocb, char __user *buffer, size_t size, loff_t pos);
+ssize_t (*aio_write)(struct kiocb *iocb, const char *buffer, size_t count, loff_t offset);
+```
+在这两个老的原型中，只含有一个缓冲区指针，而在新的原型中，则可以传递一个向量iovec，它含有多段缓冲区。详见位于https://lwn.net/Articles/170954/的文档《Asynchronous I/O andvectored operations》。
+
+AIO一般由内核中的通用代码处理，对于块设备和网络设备而言，一般在Linux的核心层的代码已经解决。字符设备驱动一般不需要实现AIO。Linux内核中对字符设备驱动实现AIO的特例包括drivers/char/mem.c里实现的null、zero等，由于zero这样的虚拟设备其实也不存在在要去读的时候读不到东西的情况，所以aio_read_zero()本质上也不包含异步操作，不过从下面的代码中可以一窥iovec的全貌：
+```c
+static ssize_t aio_read_zero(struct kiocb *iocb, const struct iovec *iov, unsigned long nr_segs, loff_t pos)
+{
+	size_t written = 0;
+	unsigned long i;
+	ssize_t ret;
+
+	for (i = 0; i < nr_segs; i++) {
+		ret = read_zero(iocb->ki_filp, iov[i].iov_base, iov[i].iov_len,
+						&pos);
+		if (ret < 0)
+			break;
+		written += ret;
+	}
+
+	return written ? written : -EFAULT;
+}
+```
